@@ -1,6 +1,8 @@
 # Rust build artifacts
 /target/
-Cargo.lock
+
+# Uncomment for libraries (not for binaries)
+# Cargo.lock
 
 # IDE
 .idea/
