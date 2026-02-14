@@ -15,18 +15,33 @@ Existing pinentry implementations (`pinentry-gtk`, `pinentry-gnome3`, `pinentry-
 
 ## Installation
 
-### Build from source
+### From crates.io (recommended)
 
 ```bash
+cargo install pinentry-egui
+```
+
+The binary will be installed to `~/.cargo/bin/pinentry-egui`.
+
+### From source
+
+```bash
+git clone https://github.com/dsociative/pinentry-egui.git
+cd pinentry-egui
 cargo build --release
+# Binary will be at ./target/release/pinentry-egui
 ```
 
 ### Configure GPG
 
 Add to `~/.gnupg/gpg-agent.conf`:
 
-```
-pinentry-program /path/to/pinentry-egui
+```conf
+# If installed via cargo install:
+pinentry-program ~/.cargo/bin/pinentry-egui
+
+# Or if built from source:
+# pinentry-program /path/to/pinentry-egui/target/release/pinentry-egui
 ```
 
 Restart gpg-agent:
@@ -35,15 +50,25 @@ Restart gpg-agent:
 gpgconf --kill gpg-agent
 ```
 
+### Requirements
+
+- Wayland compositor (niri, sway, Hyprland, etc.)
+- OpenGL support
+- Rust toolchain (for building from source)
+
 ## Testing
 
 Test the password dialog:
 
 ```bash
+# If installed via cargo install:
+echo -e "SETDESC Enter your password\nSETPROMPT Password:\nGETPIN\nBYE" | pinentry-egui
+
+# Or from source:
 echo -e "SETDESC Enter your password\nSETPROMPT Password:\nGETPIN\nBYE" | ./target/release/pinentry-egui
 ```
 
-Run unit tests:
+Run unit tests (from source):
 
 ```bash
 cargo test
