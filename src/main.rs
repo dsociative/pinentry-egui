@@ -190,7 +190,7 @@ fn show_dialog(state: PinentryState, want_pin: bool) -> DialogResult {
         ..Default::default()
     };
 
-    let _ = eframe::run_native(
+    if let Err(e) = eframe::run_native(
         &title,
         options,
         Box::new(move |_cc| {
@@ -201,14 +201,22 @@ fn show_dialog(state: PinentryState, want_pin: bool) -> DialogResult {
                 tx,
             }))
         }),
-    );
+    ) {
+        eprintln!("eframe error: {}", e);
+    }
 
     rx.try_recv().unwrap_or(DialogResult::Cancelled)
 }
 
 fn respond(out: &mut impl Write, msg: &str) {
-    let _ = writeln!(out, "{}", msg);
-    let _ = out.flush();
+    if let Err(e) = writeln!(out, "{}", msg) {
+        eprintln!("Failed to write response: {}", e);
+        process::exit(1);
+    }
+    if let Err(e) = out.flush() {
+        eprintln!("Failed to flush output: {}", e);
+        process::exit(1);
+    }
 }
 
 fn main() {
