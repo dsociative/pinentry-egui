@@ -1,5 +1,9 @@
 # pinentry-egui
 
+[![Crates.io](https://img.shields.io/crates/v/pinentry-egui.svg)](https://crates.io/crates/pinentry-egui)
+[![Downloads](https://img.shields.io/crates/d/pinentry-egui.svg)](https://crates.io/crates/pinentry-egui)
+[![License](https://img.shields.io/crates/l/pinentry-egui.svg)](https://github.com/dsociative/pinentry-egui#license)
+
 A modern, native Wayland pinentry implementation for GPG using [egui](https://github.com/emilk/egui).
 
 ## Why?
