@@ -2,6 +2,13 @@
 name = "pinentry-egui"
 version = "0.1.0"
 edition = "2021"
+authors = ["dsociative"]
+description = "Native Wayland pinentry for GPG using egui"
+repository = "https://github.com/dsociative/pinentry-egui"
+license = "MIT OR Apache-2.0"
+keywords = ["pinentry", "gpg", "wayland", "egui", "security"]
+categories = ["cryptography", "gui"]
+readme = "README.md"
 
 [dependencies]
 eframe = { version = "0.33", default-features = false, features = ["default_fonts", "wayland", "glow", "accesskit"] }
