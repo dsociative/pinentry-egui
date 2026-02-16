@@ -1,6 +1,6 @@
 [package]
 name = "pinentry-egui"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["dsociative"]
 description = "Native Wayland pinentry for GPG using egui"
@@ -12,13 +12,16 @@ readme = "README.md"
 exclude = ["CLAUDE.md"]
 
 [dependencies]
-eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "accesskit", "wayland", "x11"] }
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 secrecy = "0.10"
 
 [dev-dependencies]
+eframe = { version = "0.33", features = ["accesskit"] }
 egui_kittest = "0.33"
 accesskit = "0.21"
 
 [profile.release]
 strip = true
 lto = true
+panic = "abort"
+codegen-units = 1
