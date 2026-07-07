@@ -4,6 +4,7 @@ use std::sync::mpsc;
 
 use eframe::egui;
 use secrecy::{ExposeSecret, SecretString};
+use zeroize::Zeroizing;
 
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
@@ -48,9 +49,11 @@ struct PinentryState {
 
 #[derive(Default)]
 struct PinDialogState {
-    password: String,
+    // Keystrokes are appended here directly (never through an egui `TextEdit`,
+    // whose retained widget state and undo history would keep the plaintext), and
+    // the buffer is zeroized on drop. Moved into the `SecretString` on submit.
+    password: Zeroizing<String>,
     submitted: Option<bool>, // Some(true) = OK, Some(false) = Cancel
-    focus_set: bool,
 }
 
 fn pin_dialog_ui(
@@ -89,20 +92,34 @@ fn pin_dialog_ui(
             };
             ui.label(prompt);
             ui.add_space(4.0);
-            let response = ui.add_sized(
-                [ui.available_width(), 28.0],
-                egui::TextEdit::singleline(&mut dialog.password)
-                    .password(true)
-                    .hint_text("Enter passphrase")
-                    .font(egui::TextStyle::Body),
-            );
-            if !dialog.focus_set {
-                dialog.focus_set = true;
-                response.request_focus();
-            }
-            if response.lost_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter))
-            {
+
+            // Feed keystrokes straight into the zeroizing buffer instead of an
+            // egui `TextEdit`, so the plaintext never enters egui's retained
+            // widget state or undo history. Only a masked view is drawn.
+            ui.input(|input| {
+                for event in &input.events {
+                    match event {
+                        egui::Event::Text(text) | egui::Event::Paste(text) => {
+                            dialog.password.push_str(text);
+                        }
+                        egui::Event::Key {
+                            key: egui::Key::Backspace,
+                            pressed: true,
+                            ..
+                        } => {
+                            dialog.password.pop();
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            let dots = "\u{2022}".repeat(dialog.password.chars().count());
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.add(egui::Label::new(egui::RichText::new(dots).monospace()));
+            });
+
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 dialog.submitted = Some(true);
             }
             ui.add_space(12.0);
@@ -158,10 +175,10 @@ impl eframe::App for PinDialog {
         if let Some(ok) = self.dialog.submitted.take() {
             if ok {
                 if self.want_pin {
-                    let _ = self.tx.send(DialogResult::Pin(SecretString::from(
-                        self.dialog.password.clone(),
-                    )));
-                    self.dialog.password.clear();
+                    // Move the inner String out (leaving an empty one) into the
+                    // secret, which zeroizes it in turn.
+                    let value = std::mem::take(&mut *self.dialog.password);
+                    let _ = self.tx.send(DialogResult::Pin(SecretString::from(value)));
                 } else {
                     let _ = self.tx.send(DialogResult::Confirmed);
                 }
@@ -322,7 +339,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui_kittest::kittest::{Queryable, NodeT};
+    use egui_kittest::kittest::Queryable;
     use egui_kittest::Harness;
 
     struct TestState {
@@ -350,29 +367,30 @@ mod tests {
         )
     }
 
-    #[test]
-    fn test_password_field_gets_focus() {
-        let mut harness = make_harness("Enter your GPG passphrase", true);
-        harness.run();
-
-        let ti = harness.get_by_role(accesskit::Role::PasswordInput);
-        println!("focused: {}, value: {:?}", ti.is_focused(), ti.accesskit_node().value());
-        assert!(ti.is_focused(), "password field should be auto-focused");
-    }
-
+    // The custom masked field is not an accessible widget, so drive it with
+    // synthetic input events and assert on the resulting buffer/state.
     #[test]
     fn test_type_password() {
         let mut harness = make_harness("Enter passphrase", true);
         harness.run();
 
-        let ti = harness.get_by_role(accesskit::Role::PasswordInput);
-        assert!(ti.is_focused());
-
-        ti.type_text("secret123");
+        harness.event(egui::Event::Text("secret123".into()));
         harness.run();
 
-        println!("password: {:?}", harness.state().dialog.password);
-        assert_eq!(harness.state().dialog.password, "secret123");
+        assert_eq!(harness.state().dialog.password.as_str(), "secret123");
+    }
+
+    #[test]
+    fn test_backspace_removes_last_char() {
+        let mut harness = make_harness("Enter passphrase", true);
+        harness.run();
+
+        harness.event(egui::Event::Text("abc".into()));
+        harness.run();
+        harness.key_press(egui::Key::Backspace);
+        harness.run();
+
+        assert_eq!(harness.state().dialog.password.as_str(), "ab");
     }
 
     #[test]
@@ -380,15 +398,13 @@ mod tests {
         let mut harness = make_harness("Enter passphrase", true);
         harness.run();
 
-        let ti = harness.get_by_role(accesskit::Role::PasswordInput);
-        ti.type_text("mypass");
+        harness.event(egui::Event::Text("mypass".into()));
         harness.run();
-
         harness.key_press(egui::Key::Enter);
         harness.run();
 
-        println!("submitted: {:?}, password: {:?}", harness.state().dialog.submitted, harness.state().dialog.password);
         assert_eq!(harness.state().dialog.submitted, Some(true));
+        assert_eq!(harness.state().dialog.password.as_str(), "mypass");
     }
 
 
