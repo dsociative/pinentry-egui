@@ -13,6 +13,13 @@ use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
 use winit::window::{Window, WindowId};
 use zeroize::Zeroizing;
 
+// The keyboard grab is opt-in: with the `x11` feature off, none of this is
+// compiled and no libX11 loader is linked.
+#[cfg(feature = "x11")]
+mod grab;
+#[cfg(feature = "x11")]
+use grab::{GrabAttempt, KeyboardGrab};
+
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -221,6 +228,12 @@ struct App {
     surface: Option<SbSurface>,
     egui_state: Option<egui_winit::State>,
 
+    // Held for the dialog's lifetime; dropping it releases the keyboard grab.
+    #[cfg(feature = "x11")]
+    grab: Option<Box<KeyboardGrab>>,
+    #[cfg(feature = "x11")]
+    grab_done: bool,
+
     result: Option<DialogResult>,
     error: Option<String>,
 }
@@ -237,6 +250,10 @@ impl App {
             window: None,
             surface: None,
             egui_state: None,
+            #[cfg(feature = "x11")]
+            grab: None,
+            #[cfg(feature = "x11")]
+            grab_done: false,
             result: None,
             error: None,
         }
@@ -248,6 +265,21 @@ impl App {
     }
 
     fn redraw(&mut self, elwt: &ActiveEventLoop, window: &Rc<Window>) {
+        // Grab the keyboard once the window is viewable (X11 only), retrying on
+        // later frames until it succeeds or is determined not to apply. Applies
+        // to every dialog window, passphrase entry and confirmation alike.
+        #[cfg(feature = "x11")]
+        if !self.grab_done {
+            match grab::try_grab(window) {
+                GrabAttempt::Grabbed(g) => {
+                    self.grab = Some(g);
+                    self.grab_done = true;
+                }
+                GrabAttempt::NotApplicable => self.grab_done = true,
+                GrabAttempt::Retry => window.request_redraw(),
+            }
+        }
+
         let Some(state) = self.egui_state.as_mut() else {
             return;
         };

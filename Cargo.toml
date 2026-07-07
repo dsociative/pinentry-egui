@@ -20,15 +20,42 @@ zeroize = "1"
 # egui triple: these three MUST stay together on the 0.34 line. The CPU software
 # backend (egui_software_backend) is the linchpin: its latest release pins egui
 # 0.34, which pins egui-winit 0.34 and winit 0.30.
+#
+# Everything below is Wayland-only by default. X11 support (winit's X11 backend
+# and its libX11 loader) is off unless the `x11` feature turns it on, so an
+# X11-free default build genuinely links no X11 code.
 egui = { version = "=0.34.3", default-features = false, features = ["default_fonts"] }
-egui-winit = { version = "=0.34.3", default-features = false, features = ["wayland", "x11"] }
-egui_software_backend = "=0.0.3"
+egui-winit = { version = "=0.34.3", default-features = false, features = ["wayland"] }
+# Only the core CPU rasterizer, not its bundled winit/softbuffer glue: that glue
+# pulls `winit` with default features (which include X11), which would drag
+# `x11-dl` into every build. We drive winit/softbuffer ourselves below and use
+# only `BufferMutRef`/`ColorFieldOrder`/`EguiSoftwareRender`, all core types.
+egui_software_backend = { version = "=0.0.3", default-features = false, features = ["std"] }
 
 # Windowing + pure-CPU presentation. No GPU/OpenGL/Vulkan in the tree: the UI is
 # rasterized on the CPU by egui_software_backend and blitted with softbuffer.
-winit = "=0.30.13"
+# winit's default features include `x11`; we opt out of them and re-enable only
+# the Wayland set, so no libX11 is linked unless `x11` adds `winit/x11`.
+winit = { version = "=0.30.13", default-features = false, features = [
+    "rwh_06",
+    "wayland",
+    "wayland-dlopen",
+    "wayland-csd-adwaita",
+] }
 softbuffer = "=0.4.8"
 bytemuck = "1.25"
+
+# X11 keyboard grab (anti-keylogging). dlopens libX11 at runtime. Optional and
+# Linux-only: pulled in exclusively by the `x11` feature.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11-dl = { version = "2.21", optional = true }
+
+[features]
+# Opt-in X11 keyboard grab. OFF by default so the default build stays Wayland-
+# only and links no X11 code. Enabling it: (1) links the libX11 grab (x11-dl),
+# and (2) turns on winit's X11 windowing backend (via winit + egui-winit) so the
+# grab has a real X11 window to hold.
+x11 = ["dep:x11-dl", "winit/x11", "egui-winit/x11"]
 
 [dev-dependencies]
 # Headless UI tests: drive pin_dialog_ui with synthetic input events and assert

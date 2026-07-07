@@ -463,13 +463,9 @@ version = "0.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8ca3a47168e93a5cca79b7cb830817acaf07ebc1f8756aa368a6b2d6250f6ae"
 dependencies = [
- "bytemuck",
  "constify",
  "egui",
- "egui-winit",
- "softbuffer",
  "strength_reduce",
- "winit",
 ]
 
 [[package]]
@@ -1274,6 +1270,7 @@ dependencies = [
  "secrecy",
  "softbuffer",
  "winit",
+ "x11-dl",
  "zeroize",
 ]
 
