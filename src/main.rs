@@ -1,9 +1,24 @@
+use std::cell::RefCell;
 use std::io::{self, BufRead, Write};
+use std::num::NonZeroU32;
 use std::process;
-use std::sync::mpsc;
+use std::rc::Rc;
 
-use eframe::egui;
+use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
 use secrecy::{ExposeSecret, SecretString};
+use winit::application::ApplicationHandler;
+use winit::event::WindowEvent;
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
+use winit::window::{Window, WindowId};
+use zeroize::Zeroizing;
+
+// The keyboard grab is opt-in: with the `x11` feature off, none of this is
+// compiled and no libX11 loader is linked.
+#[cfg(feature = "x11")]
+mod grab;
+#[cfg(feature = "x11")]
+use grab::{GrabAttempt, KeyboardGrab};
 
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
@@ -46,13 +61,32 @@ struct PinentryState {
     error: String,
 }
 
-#[derive(Default)]
 struct PinDialogState {
-    password: String,
-    submitted: Option<bool>, // Some(true) = OK, Some(false) = Cancel
-    focus_set: bool,
+    /// Backing store for the passphrase. Keystrokes are appended here directly
+    /// (never through an egui `TextEdit`), and it is zeroized on drop, so the
+    /// secret is not copied into egui's retained widget/undo state and is wiped
+    /// from memory when the dialog ends. Emptied into the result on submit.
+    password: Zeroizing<String>,
+    /// Some(true) = OK, Some(false) = Cancel.
+    submitted: Option<bool>,
 }
 
+impl Default for PinDialogState {
+    fn default() -> Self {
+        PinDialogState {
+            // Reserve up front so ordinary typing does not reallocate (which
+            // would leave un-zeroized copies of the partial secret behind).
+            password: Zeroizing::new(String::with_capacity(256)),
+            submitted: None,
+        }
+    }
+}
+
+/// Lays out the dialog's widgets into `ui` and records the user's action.
+///
+/// Kept separate from the event loop so it can be driven headlessly in tests
+/// (via egui_kittest): feed input events, run a frame, and read back the
+/// resulting password / submitted flag without opening a window.
 fn pin_dialog_ui(
     ui: &mut egui::Ui,
     pin_state: &PinentryState,
@@ -60,15 +94,6 @@ fn pin_dialog_ui(
     want_pin: bool,
 ) {
     ui.vertical_centered(|ui| {
-        // Make text field stroke more visible
-        let visuals = ui.visuals_mut();
-        visuals.widgets.inactive.bg_stroke =
-            egui::Stroke::new(1.0, egui::Color32::from_gray(140));
-        visuals.widgets.hovered.bg_stroke =
-            egui::Stroke::new(1.5, egui::Color32::from_gray(180));
-        visuals.selection.stroke =
-            egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 150, 255));
-
         ui.add_space(8.0);
 
         if !pin_state.error.is_empty() {
@@ -87,24 +112,39 @@ fn pin_dialog_ui(
             } else {
                 &pin_state.prompt
             };
+
+            // Feed keystrokes straight into our zeroizing buffer instead of an
+            // egui `TextEdit`, so the plaintext never enters egui's retained
+            // widget state or undo history. Only a masked view is drawn.
+            ui.input(|input| {
+                for event in &input.events {
+                    match event {
+                        egui::Event::Text(text) | egui::Event::Paste(text) => {
+                            dialog.password.push_str(text);
+                        }
+                        egui::Event::Key {
+                            key: egui::Key::Backspace,
+                            pressed: true,
+                            ..
+                        } => {
+                            dialog.password.pop();
+                        }
+                        _ => {}
+                    }
+                }
+            });
+
             ui.label(prompt);
             ui.add_space(4.0);
-            let response = ui.add_sized(
-                [ui.available_width(), 28.0],
-                egui::TextEdit::singleline(&mut dialog.password)
-                    .password(true)
-                    .hint_text("Enter passphrase")
-                    .font(egui::TextStyle::Body),
-            );
-            if !dialog.focus_set {
-                dialog.focus_set = true;
-                response.request_focus();
-            }
-            if response.lost_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter))
-            {
-                dialog.submitted = Some(true);
-            }
+            let dots = "\u{2022}".repeat(dialog.password.chars().count());
+            egui::Frame::group(ui.style())
+                .inner_margin(egui::Margin::symmetric(6, 4))
+                .show(ui, |ui| {
+                    ui.set_min_width(240.0);
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(dots).monospace()).selectable(false),
+                    );
+                });
             ui.add_space(12.0);
         }
 
@@ -128,6 +168,15 @@ fn pin_dialog_ui(
             }
         });
     });
+
+    // Enter submits, Escape cancels. Read from the global input rather than a
+    // focused widget, since there is no `TextEdit` to own focus.
+    if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        dialog.submitted = Some(true);
+    }
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        dialog.submitted = Some(false);
+    }
 }
 
 enum DialogResult {
@@ -136,76 +185,284 @@ enum DialogResult {
     Cancelled,
 }
 
-struct PinDialog {
+type SbSurface = softbuffer::Surface<Rc<Window>, Rc<Window>>;
+
+thread_local! {
+    /// winit permits only one event loop per process (and a *failed* creation
+    /// still counts), so we keep one alive per thread and reuse it across
+    /// dialogs. This lets one gpg-agent connection drive several
+    /// `GETPIN`/`CONFIRM` prompts instead of failing with "EventLoop can't be
+    /// recreated". Access only from the thread that first created it — the main
+    /// thread, which is where winit requires the loop to run.
+    static EVENT_LOOP: RefCell<Option<EventLoop<()>>> = const { RefCell::new(None) };
+}
+
+/// Builds one egui frame, mutating `dialog` in response to input.
+///
+/// `run` is used rather than the newer `run_ui` for API stability across the
+/// egui 0.34 line; the deprecation is intentional.
+#[allow(deprecated)]
+fn build_frame(
+    egui_ctx: &egui::Context,
+    raw_input: egui::RawInput,
+    pin_state: &PinentryState,
+    dialog: &mut PinDialogState,
+    want_pin: bool,
+) -> egui::FullOutput {
+    egui_ctx.run(raw_input, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            pin_dialog_ui(ui, pin_state, dialog, want_pin);
+        });
+    })
+}
+
+struct App {
     pin_state: PinentryState,
     dialog: PinDialogState,
     want_pin: bool,
-    tx: mpsc::Sender<DialogResult>,
+
+    egui_ctx: egui::Context,
+    sw_render: EguiSoftwareRender,
+
+    window: Option<Rc<Window>>,
+    surface: Option<SbSurface>,
+    egui_state: Option<egui_winit::State>,
+
+    // Held for the dialog's lifetime; dropping it releases the keyboard grab.
+    #[cfg(feature = "x11")]
+    grab: Option<Box<KeyboardGrab>>,
+    #[cfg(feature = "x11")]
+    grab_done: bool,
+
+    result: Option<DialogResult>,
+    error: Option<String>,
 }
 
-impl eframe::App for PinDialog {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            let _ = self.tx.send(DialogResult::Cancelled);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+impl App {
+    fn new(pin_state: PinentryState, want_pin: bool) -> Self {
+        App {
+            pin_state,
+            dialog: PinDialogState::default(),
+            want_pin,
+            egui_ctx: egui::Context::default(),
+            // softbuffer wants 0x00RRGGBB (BGRA byte order on little-endian).
+            sw_render: EguiSoftwareRender::new(ColorFieldOrder::Bgra),
+            window: None,
+            surface: None,
+            egui_state: None,
+            #[cfg(feature = "x11")]
+            grab: None,
+            #[cfg(feature = "x11")]
+            grab_done: false,
+            result: None,
+            error: None,
+        }
+    }
+
+    fn fail(&mut self, elwt: &ActiveEventLoop, err: String) {
+        self.error = Some(err);
+        elwt.exit();
+    }
+
+    fn redraw(&mut self, elwt: &ActiveEventLoop, window: &Rc<Window>) {
+        // Grab the keyboard once the window is viewable (X11 only), retrying on
+        // later frames until it succeeds or is determined not to apply. Applies
+        // to every dialog window, passphrase entry and confirmation alike.
+        #[cfg(feature = "x11")]
+        if !self.grab_done {
+            match grab::try_grab(window) {
+                GrabAttempt::Grabbed(g) => {
+                    self.grab = Some(g);
+                    self.grab_done = true;
+                }
+                GrabAttempt::NotApplicable => self.grab_done = true,
+                GrabAttempt::Retry => window.request_redraw(),
+            }
+        }
+
+        let Some(state) = self.egui_state.as_mut() else {
+            return;
+        };
+        let raw_input = state.take_egui_input(window);
+
+        let full = build_frame(
+            &self.egui_ctx,
+            raw_input,
+            &self.pin_state,
+            &mut self.dialog,
+            self.want_pin,
+        );
+        state.handle_platform_output(window, full.platform_output);
+
+        if let Some(ok) = self.dialog.submitted.take() {
+            self.result = Some(if ok {
+                if self.want_pin {
+                    // Move the inner String out (leaving the Zeroizing wrapper
+                    // holding an empty one) into the secret, which zeroizes it in
+                    // turn.
+                    DialogResult::Pin(SecretString::new(
+                        std::mem::take(&mut *self.dialog.password).into(),
+                    ))
+                } else {
+                    DialogResult::Confirmed
+                }
+            } else {
+                DialogResult::Cancelled
+            });
+            elwt.exit();
             return;
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            pin_dialog_ui(ui, &self.pin_state, &mut self.dialog, self.want_pin);
-        });
+        let clipped = self.egui_ctx.tessellate(full.shapes, full.pixels_per_point);
+        if let Err(e) = self.present_frame(
+            &clipped,
+            &full.textures_delta,
+            full.pixels_per_point,
+            window,
+        ) {
+            self.fail(elwt, e);
+        }
+    }
 
-        if let Some(ok) = self.dialog.submitted.take() {
-            if ok {
-                if self.want_pin {
-                    let _ = self.tx.send(DialogResult::Pin(SecretString::from(
-                        self.dialog.password.clone(),
-                    )));
-                    self.dialog.password.clear();
-                } else {
-                    let _ = self.tx.send(DialogResult::Confirmed);
-                }
-            } else {
-                let _ = self.tx.send(DialogResult::Cancelled);
+    /// Rasterizes `clipped` into the softbuffer surface and presents it.
+    fn present_frame(
+        &mut self,
+        clipped: &[egui::ClippedPrimitive],
+        textures_delta: &egui::TexturesDelta,
+        pixels_per_point: f32,
+        window: &Rc<Window>,
+    ) -> Result<(), String> {
+        let size = window.inner_size();
+        let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
+            return Ok(());
+        };
+        let surface = self
+            .surface
+            .as_mut()
+            .ok_or_else(|| "surface not initialized".to_string())?;
+        surface.resize(w, h).map_err(|e| e.to_string())?;
+        let mut buffer = surface.buffer_mut().map_err(|e| e.to_string())?;
+        buffer.fill(0);
+        {
+            let pixels: &mut [[u8; 4]] = bytemuck::cast_slice_mut(&mut buffer);
+            let mut bref = BufferMutRef::new(pixels, size.width as usize, size.height as usize);
+            self.sw_render
+                .render(&mut bref, clipped, textures_delta, pixels_per_point);
+        }
+        buffer.present().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, elwt: &ActiveEventLoop) {
+        // Modal: only redraw in response to input, not continuously.
+        elwt.set_control_flow(ControlFlow::Wait);
+        if self.window.is_some() {
+            return;
+        }
+        let title = if self.pin_state.title.is_empty() {
+            "pinentry-egui"
+        } else {
+            &self.pin_state.title
+        };
+        let attrs = Window::default_attributes()
+            .with_title(title)
+            .with_inner_size(winit::dpi::LogicalSize::new(400.0, 200.0))
+            .with_resizable(false);
+        let window = match elwt.create_window(attrs) {
+            Ok(w) => Rc::new(w),
+            Err(e) => {
+                self.fail(elwt, e.to_string());
+                return;
             }
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        };
+
+        let context = match softbuffer::Context::new(window.clone()) {
+            Ok(c) => c,
+            Err(e) => {
+                self.fail(elwt, e.to_string());
+                return;
+            }
+        };
+        let surface = match softbuffer::Surface::new(&context, window.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                self.fail(elwt, e.to_string());
+                return;
+            }
+        };
+
+        let egui_state = egui_winit::State::new(
+            self.egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &*window,
+            Some(window.scale_factor() as f32),
+            None,
+            None,
+        );
+
+        self.surface = Some(surface);
+        self.egui_state = Some(egui_state);
+        self.window = Some(window.clone());
+        window.request_redraw();
+    }
+
+    fn window_event(&mut self, elwt: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+
+        if let Some(state) = self.egui_state.as_mut() {
+            let response = state.on_window_event(&window, &event);
+            if response.repaint {
+                window.request_redraw();
+            }
+        }
+
+        match event {
+            WindowEvent::CloseRequested => {
+                self.result = Some(DialogResult::Cancelled);
+                elwt.exit();
+            }
+            WindowEvent::RedrawRequested => self.redraw(elwt, &window),
+            _ => {}
         }
     }
 }
 
+/// Shows the dialog described by `state` and returns its outcome.
+///
+/// Reuses one process-wide event loop via `run_app_on_demand`, so it can be
+/// called repeatedly across `GETPIN`/`CONFIRM` commands on one connection. Must
+/// be called from the main thread (winit requirement) — the Assuan loop is.
 fn show_dialog(state: PinentryState, want_pin: bool) -> DialogResult {
-    let title = if state.title.is_empty() {
-        "pinentry-egui".to_string()
-    } else {
-        state.title.clone()
-    };
-
-    let (tx, rx) = mpsc::channel();
-
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title(&title)
-            .with_inner_size([400.0, 200.0])
-            .with_resizable(false),
-        ..Default::default()
-    };
-
-    if let Err(e) = eframe::run_native(
-        &title,
-        options,
-        Box::new(move |_cc| {
-            Ok(Box::new(PinDialog {
-                pin_state: state,
-                dialog: PinDialogState::default(),
-                want_pin,
-                tx,
-            }))
-        }),
-    ) {
-        eprintln!("eframe error: {}", e);
+    match run_dialog(state, want_pin) {
+        Ok(result) => result,
+        Err(e) => {
+            eprintln!("pinentry-egui error: {}", e);
+            DialogResult::Cancelled
+        }
     }
+}
 
-    rx.try_recv().unwrap_or(DialogResult::Cancelled)
+fn run_dialog(state: PinentryState, want_pin: bool) -> Result<DialogResult, String> {
+    EVENT_LOOP.with_borrow_mut(|slot| {
+        if slot.is_none() {
+            *slot = Some(EventLoop::new().map_err(|e| e.to_string())?);
+        }
+        let event_loop = slot.as_mut().expect("event loop initialized above");
+
+        let mut app = App::new(state, want_pin);
+        event_loop
+            .run_app_on_demand(&mut app)
+            .map_err(|e| e.to_string())?;
+
+        if let Some(err) = app.error.take() {
+            return Err(err);
+        }
+        Ok(app.result.take().unwrap_or(DialogResult::Cancelled))
+    })
 }
 
 fn respond(out: &mut impl Write, msg: &str) {
@@ -322,7 +579,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui_kittest::kittest::{Queryable, NodeT};
+    use egui_kittest::kittest::Queryable;
     use egui_kittest::Harness;
 
     struct TestState {
@@ -331,6 +588,8 @@ mod tests {
         want_pin: bool,
     }
 
+    /// A kittest harness that drives [`pin_dialog_ui`] for `desc`, with an empty
+    /// password and no submission to start.
     fn make_harness(desc: &str, want_pin: bool) -> Harness<'static, TestState> {
         let state = TestState {
             pin_state: PinentryState {
@@ -351,28 +610,29 @@ mod tests {
     }
 
     #[test]
-    fn test_password_field_gets_focus() {
-        let mut harness = make_harness("Enter your GPG passphrase", true);
-        harness.run();
-
-        let ti = harness.get_by_role(accesskit::Role::PasswordInput);
-        println!("focused: {}, value: {:?}", ti.is_focused(), ti.accesskit_node().value());
-        assert!(ti.is_focused(), "password field should be auto-focused");
-    }
-
-    #[test]
     fn test_type_password() {
         let mut harness = make_harness("Enter passphrase", true);
         harness.run();
 
-        let ti = harness.get_by_role(accesskit::Role::PasswordInput);
-        assert!(ti.is_focused());
-
-        ti.type_text("secret123");
+        harness.event(egui::Event::Text("secret123".into()));
         harness.run();
 
-        println!("password: {:?}", harness.state().dialog.password);
-        assert_eq!(harness.state().dialog.password, "secret123");
+        assert_eq!(harness.state().dialog.password.as_str(), "secret123");
+        // Typing alone does not submit.
+        assert_eq!(harness.state().dialog.submitted, None);
+    }
+
+    #[test]
+    fn test_backspace_removes_last_char() {
+        let mut harness = make_harness("Enter passphrase", true);
+        harness.run();
+
+        harness.event(egui::Event::Text("abc".into()));
+        harness.run();
+        harness.key_press(egui::Key::Backspace);
+        harness.run();
+
+        assert_eq!(harness.state().dialog.password.as_str(), "ab");
     }
 
     #[test]
@@ -380,17 +640,26 @@ mod tests {
         let mut harness = make_harness("Enter passphrase", true);
         harness.run();
 
-        let ti = harness.get_by_role(accesskit::Role::PasswordInput);
-        ti.type_text("mypass");
+        harness.event(egui::Event::Text("mypass".into()));
         harness.run();
-
         harness.key_press(egui::Key::Enter);
         harness.run();
 
-        println!("submitted: {:?}, password: {:?}", harness.state().dialog.submitted, harness.state().dialog.password);
         assert_eq!(harness.state().dialog.submitted, Some(true));
+        // The typed value is preserved for the caller to take.
+        assert_eq!(harness.state().dialog.password.as_str(), "mypass");
     }
 
+    #[test]
+    fn test_escape_cancels() {
+        let mut harness = make_harness("Enter passphrase", true);
+        harness.run();
+
+        harness.key_press(egui::Key::Escape);
+        harness.run();
+
+        assert_eq!(harness.state().dialog.submitted, Some(false));
+    }
 
     #[test]
     fn test_ok_button_submits() {
