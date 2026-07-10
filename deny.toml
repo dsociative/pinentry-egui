@@ -1,0 +1,37 @@
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # quick-xml DoS advisories: reachable only via wayland-scanner, a build-time
+    # code generator parsing the bundled Wayland protocol XML — never untrusted
+    # input at runtime.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    # ttf-parser is unmaintained; pulled by sctk-adwaita (window decorations)
+    # to render the title from system fonts. Revisit when winit/sctk-adwaita
+    # move off ab_glyph.
+    "RUSTSEC-2026-0192",
+]
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "BSL-1.0",
+    # epaint_default_fonts: embedded font files
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
