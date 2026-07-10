@@ -17,7 +17,7 @@ secrecy = "0.10"
 
 [dev-dependencies]
 eframe = { version = "0.33", features = ["accesskit"] }
-egui_kittest = "0.33"
+egui_kittest = "0.34"
 accesskit = "0.21"
 
 [profile.release]
