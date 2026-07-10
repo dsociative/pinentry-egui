@@ -1,5 +1,8 @@
 # pinentry-egui
 
+[![CI](https://github.com/dsociative/pinentry-egui/actions/workflows/ci.yml/badge.svg)](https://github.com/dsociative/pinentry-egui/actions/workflows/ci.yml)
+[![Security](https://github.com/dsociative/pinentry-egui/actions/workflows/security.yml/badge.svg)](https://github.com/dsociative/pinentry-egui/actions/workflows/security.yml)
+[![CodeQL](https://github.com/dsociative/pinentry-egui/actions/workflows/codeql.yml/badge.svg)](https://github.com/dsociative/pinentry-egui/actions/workflows/codeql.yml)
 [![Crates.io](https://img.shields.io/crates/v/pinentry-egui.svg)](https://crates.io/crates/pinentry-egui)
 [![Downloads](https://img.shields.io/crates/d/pinentry-egui.svg)](https://crates.io/crates/pinentry-egui)
 [![License](https://img.shields.io/crates/l/pinentry-egui.svg)](https://github.com/dsociative/pinentry-egui#license)
