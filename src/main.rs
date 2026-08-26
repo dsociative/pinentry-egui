@@ -161,14 +161,15 @@ struct PinDialog {
 }
 
 impl eframe::App for PinDialog {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             let _ = self.tx.send(DialogResult::Cancelled);
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::Frame::central_panel(ui.style()).show(ui, |ui| {
             pin_dialog_ui(ui, &self.pin_state, &mut self.dialog, self.want_pin);
         });
 
