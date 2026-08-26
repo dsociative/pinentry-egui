@@ -49,11 +49,16 @@ Live UI automation: build with `--features inspection`, run with
 ## Build & Install
 
 ```bash
-cargo +stable build --release   # default toolchain here is an old nightly; egui 0.36 needs rustc 1.95+
+cargo +stable install --path . --locked   # default toolchain here is an old nightly; egui 0.36 needs rustc 1.95+
 # In ~/.gnupg/gpg-agent.conf:
-# pinentry-program /home/dsociative/study/pinentry-egui/target/release/pinentry-egui
+# pinentry-program ~/.cargo/bin/pinentry-egui
 gpgconf --kill gpg-agent
 ```
+
+gpg-agent execs the pinentry binary anew for every prompt, so reinstalling
+to the same path takes effect on the next prompt without restarting the
+agent; `gpgconf --kill` is only needed when the `pinentry-program` path
+itself changes.
 
 ## Conventions
 

@@ -98,11 +98,13 @@ Notes:
 - **Never enable `inspection` in the binary you point gpg-agent at for real
   use**: with `EGUI_INSPECTION` set, any local process can read the dialog
   (including the passphrase dots and window contents) and inject input.
-- Inspection serves the **first** dialog of a process. When one Assuan
-  session shows several dialogs in a row, later dialogs still work for the
-  user, but the inspection listener stays wired to the first one (an
-  `egui_inspection` 0.36 limitation). gpg-agent normally launches one
-  pinentry process per prompt, so in practice every prompt is inspectable.
+- Inspection serves the **first** dialog of a process. eframe re-attaches
+  the plugin for every dialog, but the first dialog's accept thread never
+  releases the port, so later binds fail with `AddrInUse` (eframe only
+  logs a warning) while the stale listener keeps answering for a dead
+  context — an `egui_inspection` 0.36 limitation. Later dialogs still work
+  for the user, and gpg-agent launches one pinentry process per prompt, so
+  in practice every prompt is inspectable.
 
 ## Implementation Details
 
