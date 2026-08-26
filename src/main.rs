@@ -178,11 +178,21 @@ struct PinDialog {
     tx: mpsc::Sender<DialogResult>,
 }
 
+impl PinDialog {
+    // If the receiver in show_dialog is gone the result cannot be delivered;
+    // show_dialog then falls back to Cancelled, so log and move on.
+    fn deliver(&self, result: DialogResult) {
+        if let Err(e) = self.tx.send(result) {
+            eprintln!("Failed to deliver dialog result: {}", e);
+        }
+    }
+}
+
 impl eframe::App for PinDialog {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            let _ = self.tx.send(DialogResult::Cancelled);
+            self.deliver(DialogResult::Cancelled);
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
@@ -197,12 +207,12 @@ impl eframe::App for PinDialog {
                     // Move the inner String out (leaving an empty one) into the
                     // secret, which zeroizes it in turn.
                     let value = std::mem::take(&mut *self.dialog.password);
-                    let _ = self.tx.send(DialogResult::Pin(SecretString::from(value)));
+                    self.deliver(DialogResult::Pin(SecretString::from(value)));
                 } else {
-                    let _ = self.tx.send(DialogResult::Confirmed);
+                    self.deliver(DialogResult::Confirmed);
                 }
             } else {
-                let _ = self.tx.send(DialogResult::Cancelled);
+                self.deliver(DialogResult::Cancelled);
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
