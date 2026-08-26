@@ -4,6 +4,7 @@ use std::sync::mpsc;
 
 use eframe::egui;
 use secrecy::{ExposeSecret, SecretString};
+use zeroize::Zeroizing;
 
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
@@ -48,9 +49,11 @@ struct PinentryState {
 
 #[derive(Default)]
 struct PinDialogState {
-    password: String,
+    // Keystrokes are appended here directly (never through an egui `TextEdit`,
+    // whose retained widget state and undo history would keep the plaintext), and
+    // the buffer is zeroized on drop. Moved into the `SecretString` on submit.
+    password: Zeroizing<String>,
     submitted: Option<bool>, // Some(true) = OK, Some(false) = Cancel
-    focus_set: bool,
 }
 
 fn pin_dialog_ui(
@@ -89,20 +92,52 @@ fn pin_dialog_ui(
             };
             ui.label(prompt);
             ui.add_space(4.0);
-            let response = ui.add_sized(
-                [ui.available_width(), 28.0],
-                egui::TextEdit::singleline(&mut dialog.password)
-                    .password(true)
-                    .hint_text("Enter passphrase")
-                    .font(egui::TextStyle::Body),
-            );
-            if !dialog.focus_set {
-                dialog.focus_set = true;
-                response.request_focus();
-            }
-            if response.lost_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter))
-            {
+
+            // Feed keystrokes straight into the zeroizing buffer instead of an
+            // egui `TextEdit`, so the plaintext never enters egui's retained
+            // widget state or undo history. Only a masked view is drawn.
+            ui.input(|input| {
+                for event in &input.events {
+                    match event {
+                        egui::Event::Text(text) | egui::Event::Paste(text) => {
+                            dialog.password.push_str(text);
+                        }
+                        egui::Event::Key {
+                            key: egui::Key::Backspace,
+                            pressed: true,
+                            ..
+                        } => {
+                            dialog.password.pop();
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            // There is no TextEdit here (see above), so paint the two affordances
+            // a text box normally provides: a focus-colored frame while keystrokes
+            // are routed to the field, and a caret after the last bullet.
+            let dots = "\u{2022}".repeat(dialog.password.chars().count());
+            let focus_stroke = ui.visuals().selection.stroke;
+            let caret_stroke = ui.visuals().text_cursor.stroke;
+            egui::Frame::group(ui.style())
+                .stroke(focus_stroke)
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
+                    ui.set_min_height(row_height);
+                    let response =
+                        ui.add(egui::Label::new(egui::RichText::new(dots).monospace()));
+                    let rect = response.rect;
+                    let caret_x = rect.right() + 2.0;
+                    let caret_y = if rect.height() >= 1.0 {
+                        rect.y_range()
+                    } else {
+                        egui::Rangef::new(rect.center().y - row_height / 2.0, rect.center().y + row_height / 2.0)
+                    };
+                    ui.painter().vline(caret_x, caret_y, caret_stroke);
+                });
+
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 dialog.submitted = Some(true);
             }
             ui.add_space(12.0);
@@ -143,30 +178,41 @@ struct PinDialog {
     tx: mpsc::Sender<DialogResult>,
 }
 
+impl PinDialog {
+    // If the receiver in show_dialog is gone the result cannot be delivered;
+    // show_dialog then falls back to Cancelled, so log and move on.
+    fn deliver(&self, result: DialogResult) {
+        if let Err(e) = self.tx.send(result) {
+            eprintln!("Failed to deliver dialog result: {}", e);
+        }
+    }
+}
+
 impl eframe::App for PinDialog {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            let _ = self.tx.send(DialogResult::Cancelled);
+            self.deliver(DialogResult::Cancelled);
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::Frame::central_panel(ui.style()).show(ui, |ui| {
             pin_dialog_ui(ui, &self.pin_state, &mut self.dialog, self.want_pin);
         });
 
         if let Some(ok) = self.dialog.submitted.take() {
             if ok {
                 if self.want_pin {
-                    let _ = self.tx.send(DialogResult::Pin(SecretString::from(
-                        self.dialog.password.clone(),
-                    )));
-                    self.dialog.password.clear();
+                    // Move the inner String out (leaving an empty one) into the
+                    // secret, which zeroizes it in turn.
+                    let value = std::mem::take(&mut *self.dialog.password);
+                    self.deliver(DialogResult::Pin(SecretString::from(value)));
                 } else {
-                    let _ = self.tx.send(DialogResult::Confirmed);
+                    self.deliver(DialogResult::Confirmed);
                 }
             } else {
-                let _ = self.tx.send(DialogResult::Cancelled);
+                self.deliver(DialogResult::Cancelled);
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -302,7 +348,7 @@ fn main() {
                     respond(&mut stdout, &format!("D {}", process::id()));
                     respond(&mut stdout, "OK");
                 } else if arg == "version" {
-                    respond(&mut stdout, "D 0.1.0");
+                    respond(&mut stdout, concat!("D ", env!("CARGO_PKG_VERSION")));
                     respond(&mut stdout, "OK");
                 } else {
                     respond(&mut stdout, "OK");
@@ -322,7 +368,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui_kittest::kittest::{Queryable, NodeT};
+    use egui_kittest::kittest::Queryable;
     use egui_kittest::Harness;
 
     struct TestState {
@@ -350,29 +396,30 @@ mod tests {
         )
     }
 
-    #[test]
-    fn test_password_field_gets_focus() {
-        let mut harness = make_harness("Enter your GPG passphrase", true);
-        harness.run();
-
-        let ti = harness.get_by_role(accesskit::Role::PasswordInput);
-        println!("focused: {}, value: {:?}", ti.is_focused(), ti.accesskit_node().value());
-        assert!(ti.is_focused(), "password field should be auto-focused");
-    }
-
+    // The custom masked field is not an accessible widget, so drive it with
+    // synthetic input events and assert on the resulting buffer/state.
     #[test]
     fn test_type_password() {
         let mut harness = make_harness("Enter passphrase", true);
         harness.run();
 
-        let ti = harness.get_by_role(accesskit::Role::PasswordInput);
-        assert!(ti.is_focused());
-
-        ti.type_text("secret123");
+        harness.event(egui::Event::Text("secret123".into()));
         harness.run();
 
-        println!("password: {:?}", harness.state().dialog.password);
-        assert_eq!(harness.state().dialog.password, "secret123");
+        assert_eq!(harness.state().dialog.password.as_str(), "secret123");
+    }
+
+    #[test]
+    fn test_backspace_removes_last_char() {
+        let mut harness = make_harness("Enter passphrase", true);
+        harness.run();
+
+        harness.event(egui::Event::Text("abc".into()));
+        harness.run();
+        harness.key_press(egui::Key::Backspace);
+        harness.run();
+
+        assert_eq!(harness.state().dialog.password.as_str(), "ab");
     }
 
     #[test]
@@ -380,15 +427,13 @@ mod tests {
         let mut harness = make_harness("Enter passphrase", true);
         harness.run();
 
-        let ti = harness.get_by_role(accesskit::Role::PasswordInput);
-        ti.type_text("mypass");
+        harness.event(egui::Event::Text("mypass".into()));
         harness.run();
-
         harness.key_press(egui::Key::Enter);
         harness.run();
 
-        println!("submitted: {:?}, password: {:?}", harness.state().dialog.submitted, harness.state().dialog.password);
         assert_eq!(harness.state().dialog.submitted, Some(true));
+        assert_eq!(harness.state().dialog.password.as_str(), "mypass");
     }
 
 
@@ -412,6 +457,68 @@ mod tests {
         harness.run();
 
         assert_eq!(harness.state().dialog.submitted, Some(false));
+    }
+
+    // The masked field paints its own caret (a vertical line in the text-cursor
+    // color) and a focus-colored frame, since there is no TextEdit to do it.
+    // Assert on the emitted shapes so no GPU renderer is needed.
+    fn find_caret(harness: &Harness<'_, TestState>) -> bool {
+        let caret_color = harness
+            .ctx
+            .global_style()
+            .visuals
+            .text_cursor
+            .stroke
+            .color;
+        harness.output().shapes.iter().any(|clipped| {
+            if let egui::epaint::Shape::LineSegment { points, stroke } = &clipped.shape {
+                stroke.color == caret_color && (points[0].x - points[1].x).abs() < 0.5
+            } else {
+                false
+            }
+        })
+    }
+
+    #[test]
+    fn test_masked_field_has_caret() {
+        let mut harness = make_harness("Enter passphrase", true);
+        harness.run();
+        assert!(find_caret(&harness), "empty masked field should show a caret");
+
+        harness.event(egui::Event::Text("abc".into()));
+        harness.run();
+        assert!(
+            find_caret(&harness),
+            "masked field with input should show a caret"
+        );
+    }
+
+    #[test]
+    fn test_masked_field_has_focus_frame() {
+        let mut harness = make_harness("Enter passphrase", true);
+        harness.run();
+
+        // pin_dialog_ui sets the selection stroke to this exact color; the field
+        // frame must use it to signal that keystrokes go to the field.
+        let focus_color = egui::Color32::from_rgb(100, 150, 255);
+        let found = harness.output().shapes.iter().any(|clipped| {
+            if let egui::epaint::Shape::Rect(rect_shape) = &clipped.shape {
+                rect_shape.stroke.color == focus_color
+            } else {
+                false
+            }
+        });
+        assert!(found, "masked field should draw a focus-colored frame");
+    }
+
+    #[test]
+    fn test_confirm_dialog_has_no_caret() {
+        let mut harness = make_harness("Do you trust this key?", false);
+        harness.run();
+        assert!(
+            !find_caret(&harness),
+            "confirm dialog has no input field, so no caret"
+        );
     }
 
     #[test]
