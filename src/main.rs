@@ -348,7 +348,7 @@ fn main() {
                     respond(&mut stdout, &format!("D {}", process::id()));
                     respond(&mut stdout, "OK");
                 } else if arg == "version" {
-                    respond(&mut stdout, "D 0.1.0");
+                    respond(&mut stdout, concat!("D ", env!("CARGO_PKG_VERSION")));
                     respond(&mut stdout, "OK");
                 } else {
                     respond(&mut stdout, "OK");
