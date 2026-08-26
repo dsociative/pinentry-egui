@@ -18,7 +18,7 @@ Existing pinentry implementations (`pinentry-gtk`, `pinentry-gnome3`, `pinentry-
 - **Pure Wayland** - No X11/DISPLAY dependencies
 - **Assuan protocol** - Full compatibility with gpg-agent
 - **Minimal dependencies** - Single Rust binary with egui + glow (OpenGL)
-- **Secure** - Uses `secrecy` crate for password zeroing in memory
+- **Secure** - Keystrokes go straight into a zeroizing buffer (`zeroize` + `secrecy`); the plaintext never enters egui's retained widget state or undo history
 
 ## Installation
 
@@ -61,7 +61,7 @@ gpgconf --kill gpg-agent
 
 - Wayland compositor (niri, sway, Hyprland, etc.)
 - OpenGL support
-- Rust toolchain (for building from source)
+- Rust 1.95+ toolchain (for building from source)
 
 ## Testing
 
@@ -80,6 +80,29 @@ Run unit tests (from source):
 ```bash
 cargo test
 ```
+
+### UI automation with egui_mcp
+
+An opt-in `inspection` cargo feature exposes eframe's [inspection
+protocol](https://crates.io/crates/egui_inspection) so an AI agent (or any
+[egui_mcp](https://crates.io/crates/egui_mcp) client) can read the widget
+tree, type into the dialog, click buttons and take screenshots:
+
+```bash
+cargo build --features inspection
+EGUI_INSPECTION=1 ./target/debug/pinentry-egui   # binds 127.0.0.1:5719
+```
+
+Notes:
+
+- **Never enable `inspection` in the binary you point gpg-agent at for real
+  use**: with `EGUI_INSPECTION` set, any local process can read the dialog
+  (including the passphrase dots and window contents) and inject input.
+- Inspection serves the **first** dialog of a process. When one Assuan
+  session shows several dialogs in a row, later dialogs still work for the
+  user, but the inspection listener stays wired to the first one (an
+  `egui_inspection` 0.36 limitation). gpg-agent normally launches one
+  pinentry process per prompt, so in practice every prompt is inspectable.
 
 ## Implementation Details
 
