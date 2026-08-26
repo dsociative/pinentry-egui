@@ -12,13 +12,13 @@ readme = "README.md"
 exclude = ["CLAUDE.md"]
 
 [dependencies]
-eframe = { version = "0.34", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 secrecy = "0.10"
 zeroize = "1"
 
 [dev-dependencies]
-eframe = { version = "0.34", features = ["accesskit"] }
-egui_kittest = "0.34"
+eframe = { version = "0.36", features = ["accesskit"] }
+egui_kittest = "0.36"
 
 [profile.release]
 strip = true
