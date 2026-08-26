@@ -16,6 +16,13 @@ eframe = { version = "0.36", default-features = false, features = ["default_font
 secrecy = "0.10"
 zeroize = "1"
 
+[features]
+# Opt-in UI-automation hook for testing with egui_mcp. Compiled out by default;
+# even when compiled in, eframe opens the inspection port only while the
+# EGUI_INSPECTION env var is set. Do not enable in release builds of a real
+# pinentry: it lets a local peer read the widget tree and inject input.
+inspection = ["eframe/inspection"]
+
 [dev-dependencies]
 eframe = { version = "0.36", features = ["accesskit"] }
 egui_kittest = "0.36"
