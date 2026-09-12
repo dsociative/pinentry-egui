@@ -230,6 +230,7 @@ fn show_dialog(state: PinentryState, want_pin: bool) -> DialogResult {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            .with_window_type(egui::X11WindowType::Dialog)
             .with_title(&title)
             .with_inner_size([400.0, 200.0])
             .with_resizable(false),
