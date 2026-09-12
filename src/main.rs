@@ -12,8 +12,10 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(byte);
+            let high = char::from(bytes[i + 1]).to_digit(16);
+            let low = char::from(bytes[i + 2]).to_digit(16);
+            if let (Some(high), Some(low)) = (high, low) {
+                out.push((high * 16 + low) as u8);
                 i += 3;
                 continue;
             }
@@ -26,12 +28,12 @@ fn percent_decode(s: &str) -> String {
 
 fn percent_encode_password(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'%' => out.push_str("%25"),
-            b'\r' => out.push_str("%0D"),
-            b'\n' => out.push_str("%0A"),
-            _ => out.push(b as char),
+    for ch in s.chars() {
+        match ch {
+            '%' => out.push_str("%25"),
+            '\r' => out.push_str("%0D"),
+            '\n' => out.push_str("%0A"),
+            _ => out.push(ch),
         }
     }
     out
@@ -370,6 +372,40 @@ mod tests {
     use super::*;
     use egui_kittest::kittest::Queryable;
     use egui_kittest::Harness;
+
+    #[test]
+    fn assuan_encoding_preserves_utf8() {
+        for text in ["", "test", "café", "漢字", "🔑", "e\u{301}"] {
+            assert_eq!(percent_encode_password(text).as_bytes(), text.as_bytes());
+        }
+    }
+
+    #[test]
+    fn assuan_encoding_escapes_protocol_delimiters() {
+        let text = "café%\r\n漢字";
+        let encoded = "café%25%0D%0A漢字";
+        assert_eq!(percent_encode_password(text), encoded);
+        assert_eq!(percent_decode(encoded), text);
+    }
+
+    #[test]
+    fn assuan_decoding_accepts_escaped_utf8() {
+        for (encoded, text) in [
+            ("%C3%A9", "é"),
+            ("%c3%a9", "é"),
+            ("%F0%9F%94%91", "🔑"),
+            ("漢字%20café", "漢字 café"),
+        ] {
+            assert_eq!(percent_decode(encoded), text);
+        }
+    }
+
+    #[test]
+    fn assuan_decoding_preserves_malformed_escapes() {
+        for text in ["%", "%a", "%GG", "%aé", "%éx", "漢%a🔑"] {
+            assert_eq!(percent_decode(text), text);
+        }
+    }
 
     struct TestState {
         pin_state: PinentryState,
