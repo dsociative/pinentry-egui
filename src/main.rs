@@ -12,8 +12,10 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(byte);
+            let high = char::from(bytes[i + 1]).to_digit(16);
+            let low = char::from(bytes[i + 2]).to_digit(16);
+            if let (Some(high), Some(low)) = (high, low) {
+                out.push((high * 16 + low) as u8);
                 i += 3;
                 continue;
             }
@@ -26,12 +28,12 @@ fn percent_decode(s: &str) -> String {
 
 fn percent_encode_password(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'%' => out.push_str("%25"),
-            b'\r' => out.push_str("%0D"),
-            b'\n' => out.push_str("%0A"),
-            _ => out.push(b as char),
+    for ch in s.chars() {
+        match ch {
+            '%' => out.push_str("%25"),
+            '\r' => out.push_str("%0D"),
+            '\n' => out.push_str("%0A"),
+            _ => out.push(ch),
         }
     }
     out
@@ -65,12 +67,9 @@ fn pin_dialog_ui(
     ui.vertical_centered(|ui| {
         // Make text field stroke more visible
         let visuals = ui.visuals_mut();
-        visuals.widgets.inactive.bg_stroke =
-            egui::Stroke::new(1.0, egui::Color32::from_gray(140));
-        visuals.widgets.hovered.bg_stroke =
-            egui::Stroke::new(1.5, egui::Color32::from_gray(180));
-        visuals.selection.stroke =
-            egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 150, 255));
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(140));
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.5, egui::Color32::from_gray(180));
+        visuals.selection.stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 150, 255));
 
         ui.add_space(8.0);
 
@@ -125,14 +124,16 @@ fn pin_dialog_ui(
                     ui.set_min_width(ui.available_width());
                     let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
                     ui.set_min_height(row_height);
-                    let response =
-                        ui.add(egui::Label::new(egui::RichText::new(dots).monospace()));
+                    let response = ui.add(egui::Label::new(egui::RichText::new(dots).monospace()));
                     let rect = response.rect;
                     let caret_x = rect.right() + 2.0;
                     let caret_y = if rect.height() >= 1.0 {
                         rect.y_range()
                     } else {
-                        egui::Rangef::new(rect.center().y - row_height / 2.0, rect.center().y + row_height / 2.0)
+                        egui::Rangef::new(
+                            rect.center().y - row_height / 2.0,
+                            rect.center().y + row_height / 2.0,
+                        )
                     };
                     ui.painter().vline(caret_x, caret_y, caret_stroke);
                 });
@@ -230,6 +231,7 @@ fn show_dialog(state: PinentryState, want_pin: bool) -> DialogResult {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            .with_window_type(egui::X11WindowType::Dialog)
             .with_title(&title)
             .with_inner_size([400.0, 200.0])
             .with_resizable(false),
@@ -371,6 +373,58 @@ mod tests {
     use egui_kittest::kittest::Queryable;
     use egui_kittest::Harness;
 
+    #[test]
+    fn assuan_encoding_preserves_utf8() {
+        for text in ["", "test", "café", "漢字", "🔑", "e\u{301}"] {
+            assert_eq!(percent_encode_password(text).as_bytes(), text.as_bytes());
+        }
+    }
+
+    #[test]
+    fn assuan_encoding_escapes_protocol_delimiters() {
+        let text = "café%\r\n漢字";
+        let encoded = "café%25%0D%0A漢字";
+        assert_eq!(percent_encode_password(text), encoded);
+        assert_eq!(percent_decode(encoded), text);
+    }
+
+    #[test]
+    fn assuan_encoding_escapes_delimiters_unconditionally() {
+        // The wire format is line-based, so a raw CR or LF inside `D <password>`
+        // would let a passphrase forge protocol lines. The escaping must hold for
+        // every input, not just for one that happens to contain a '%' the way the
+        // fixture above does.
+        for text in ["\n", "\r", "漢\n字", "café\r\n", "🔑\r🔑", "e\u{301}\n"] {
+            let encoded = percent_encode_password(text);
+            assert!(
+                !encoded.contains(['\r', '\n']),
+                "raw delimiter survived encoding: {:?}",
+                encoded
+            );
+            assert_eq!(percent_decode(&encoded), text);
+        }
+        assert_eq!(percent_encode_password("漢\n字"), "漢%0A字");
+    }
+
+    #[test]
+    fn assuan_decoding_accepts_escaped_utf8() {
+        for (encoded, text) in [
+            ("%C3%A9", "é"),
+            ("%c3%a9", "é"),
+            ("%F0%9F%94%91", "🔑"),
+            ("漢字%20café", "漢字 café"),
+        ] {
+            assert_eq!(percent_decode(encoded), text);
+        }
+    }
+
+    #[test]
+    fn assuan_decoding_preserves_malformed_escapes() {
+        for text in ["%", "%a", "%GG", "%aé", "%éx", "漢%a🔑"] {
+            assert_eq!(percent_decode(text), text);
+        }
+    }
+
     struct TestState {
         pin_state: PinentryState,
         dialog: PinDialogState,
@@ -436,7 +490,6 @@ mod tests {
         assert_eq!(harness.state().dialog.password.as_str(), "mypass");
     }
 
-
     #[test]
     fn test_ok_button_submits() {
         let mut harness = make_harness("Enter passphrase", true);
@@ -463,13 +516,7 @@ mod tests {
     // color) and a focus-colored frame, since there is no TextEdit to do it.
     // Assert on the emitted shapes so no GPU renderer is needed.
     fn find_caret(harness: &Harness<'_, TestState>) -> bool {
-        let caret_color = harness
-            .ctx
-            .global_style()
-            .visuals
-            .text_cursor
-            .stroke
-            .color;
+        let caret_color = harness.ctx.global_style().visuals.text_cursor.stroke.color;
         harness.output().shapes.iter().any(|clipped| {
             if let egui::epaint::Shape::LineSegment { points, stroke } = &clipped.shape {
                 stroke.color == caret_color && (points[0].x - points[1].x).abs() < 0.5
@@ -483,7 +530,10 @@ mod tests {
     fn test_masked_field_has_caret() {
         let mut harness = make_harness("Enter passphrase", true);
         harness.run();
-        assert!(find_caret(&harness), "empty masked field should show a caret");
+        assert!(
+            find_caret(&harness),
+            "empty masked field should show a caret"
+        );
 
         harness.event(egui::Event::Text("abc".into()));
         harness.run();
