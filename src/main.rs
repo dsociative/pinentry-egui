@@ -67,12 +67,9 @@ fn pin_dialog_ui(
     ui.vertical_centered(|ui| {
         // Make text field stroke more visible
         let visuals = ui.visuals_mut();
-        visuals.widgets.inactive.bg_stroke =
-            egui::Stroke::new(1.0, egui::Color32::from_gray(140));
-        visuals.widgets.hovered.bg_stroke =
-            egui::Stroke::new(1.5, egui::Color32::from_gray(180));
-        visuals.selection.stroke =
-            egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 150, 255));
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, egui::Color32::from_gray(140));
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.5, egui::Color32::from_gray(180));
+        visuals.selection.stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 150, 255));
 
         ui.add_space(8.0);
 
@@ -127,14 +124,16 @@ fn pin_dialog_ui(
                     ui.set_min_width(ui.available_width());
                     let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
                     ui.set_min_height(row_height);
-                    let response =
-                        ui.add(egui::Label::new(egui::RichText::new(dots).monospace()));
+                    let response = ui.add(egui::Label::new(egui::RichText::new(dots).monospace()));
                     let rect = response.rect;
                     let caret_x = rect.right() + 2.0;
                     let caret_y = if rect.height() >= 1.0 {
                         rect.y_range()
                     } else {
-                        egui::Rangef::new(rect.center().y - row_height / 2.0, rect.center().y + row_height / 2.0)
+                        egui::Rangef::new(
+                            rect.center().y - row_height / 2.0,
+                            rect.center().y + row_height / 2.0,
+                        )
                     };
                     ui.painter().vline(caret_x, caret_y, caret_stroke);
                 });
@@ -491,7 +490,6 @@ mod tests {
         assert_eq!(harness.state().dialog.password.as_str(), "mypass");
     }
 
-
     #[test]
     fn test_ok_button_submits() {
         let mut harness = make_harness("Enter passphrase", true);
@@ -518,13 +516,7 @@ mod tests {
     // color) and a focus-colored frame, since there is no TextEdit to do it.
     // Assert on the emitted shapes so no GPU renderer is needed.
     fn find_caret(harness: &Harness<'_, TestState>) -> bool {
-        let caret_color = harness
-            .ctx
-            .global_style()
-            .visuals
-            .text_cursor
-            .stroke
-            .color;
+        let caret_color = harness.ctx.global_style().visuals.text_cursor.stroke.color;
         harness.output().shapes.iter().any(|clipped| {
             if let egui::epaint::Shape::LineSegment { points, stroke } = &clipped.shape {
                 stroke.color == caret_color && (points[0].x - points[1].x).abs() < 0.5
@@ -538,7 +530,10 @@ mod tests {
     fn test_masked_field_has_caret() {
         let mut harness = make_harness("Enter passphrase", true);
         harness.run();
-        assert!(find_caret(&harness), "empty masked field should show a caret");
+        assert!(
+            find_caret(&harness),
+            "empty masked field should show a caret"
+        );
 
         harness.event(egui::Event::Text("abc".into()));
         harness.run();
