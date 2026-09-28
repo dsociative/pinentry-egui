@@ -390,6 +390,24 @@ mod tests {
     }
 
     #[test]
+    fn assuan_encoding_escapes_delimiters_unconditionally() {
+        // The wire format is line-based, so a raw CR or LF inside `D <password>`
+        // would let a passphrase forge protocol lines. The escaping must hold for
+        // every input, not just for one that happens to contain a '%' the way the
+        // fixture above does.
+        for text in ["\n", "\r", "漢\n字", "café\r\n", "🔑\r🔑", "e\u{301}\n"] {
+            let encoded = percent_encode_password(text);
+            assert!(
+                !encoded.contains(['\r', '\n']),
+                "raw delimiter survived encoding: {:?}",
+                encoded
+            );
+            assert_eq!(percent_decode(&encoded), text);
+        }
+        assert_eq!(percent_encode_password("漢\n字"), "漢%0A字");
+    }
+
+    #[test]
     fn assuan_decoding_accepts_escaped_utf8() {
         for (encoded, text) in [
             ("%C3%A9", "é"),
