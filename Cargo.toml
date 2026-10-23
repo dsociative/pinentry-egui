@@ -25,7 +25,7 @@ inspection = ["eframe/inspection"]
 
 [dev-dependencies]
 eframe = { version = "0.36", features = ["accesskit"] }
-egui_kittest = "0.36"
+egui_kittest = "0.37"
 
 [profile.release]
 strip = true
